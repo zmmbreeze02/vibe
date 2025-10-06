@@ -1,95 +1,80 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+'use client';
 
-export default function Home() {
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useMedia } from '@/context/MediaContext';
+import MicIndicator from '@/components/MicIndicator';
+import VideoPlayer from '@/components/VideoPlayer';
+
+const adjectives = ['Happy', 'Cool', 'Sunny', 'Brave', 'Clever', 'Gentle'];
+const nouns = ['Panda', 'Lion', 'Tiger', 'Eagle', 'Shark', 'Wolf'];
+
+const generateRandomName = () => {
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const noun = nouns[Math.floor(Math.random() * nouns.length)];
+  return `${adj} ${noun}`;
+};
+
+export default function LobbyPage() {
+  const router = useRouter();
+  const { localStream, setLocalStream, name, setName } = useMedia();
+  const [roomId, setRoomId] = useState('');
+
+  useEffect(() => {
+    // Get user media
+    const getMedia = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        setLocalStream(stream);
+      } catch (error) {
+        console.error('Error accessing media devices.', error);
+      }
+    };
+    if (!localStream) {
+      getMedia();
+    }
+
+    // Handle name generation and persistence
+    const storedName = localStorage.getItem('userName');
+    if (storedName) {
+      setName(storedName);
+    } else {
+      const newName = generateRandomName();
+      setName(newName);
+      localStorage.setItem('userName', newName);
+    }
+
+    return () => {
+      if (localStream && !localStream.active) {
+        localStream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [localStream, setLocalStream, setName]);
+
+  const handleJoin = () => {
+    if (localStream && name) {
+      const finalRoomId = roomId || crypto.randomUUID();
+      router.push(`/room/${finalRoomId}`);
+    }
+  };
+
   return (
-    <div className={styles.page}>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol>
-          <li>
-            Get started by editing <code>src/app/page.tsx</code>.
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
-
-        <div className={styles.ctas}>
-          <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className={styles.logo}
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-            className={styles.secondary}
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className={styles.footer}>
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+    <div className="lobby-container">
+      <h2>Ready to join?</h2>
+      <div className="lobby-video-preview">
+        <VideoPlayer stream={localStream} name="You" isLocal={true} />
+      </div>
+      <MicIndicator stream={localStream} />
+      <h3 style={{ marginTop: 0 }}>{name}</h3>
+      <input
+        type="text"
+        placeholder="Enter Room ID (or leave blank for new)"
+        value={roomId}
+        onChange={(e) => setRoomId(e.target.value)}
+      />
+      <button onClick={handleJoin} disabled={!localStream || !name}>
+        Join Room
+      </button>
     </div>
   );
 }
