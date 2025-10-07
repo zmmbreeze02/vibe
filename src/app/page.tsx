@@ -17,11 +17,11 @@ const generateRandomName = () => {
 
 export default function LobbyPage() {
   const router = useRouter();
-  const { localStream, setLocalStream, name, setName } = useMedia();
+  const { localStream, setLocalStream, name, setName, sdk } = useMedia();
   const [roomId, setRoomId] = useState('');
+  const [socketConnected, setSocketConnected] = useState(false);
 
   useEffect(() => {
-    // Get user media
     const getMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -30,11 +30,8 @@ export default function LobbyPage() {
         console.error('Error accessing media devices.', error);
       }
     };
-    if (!localStream) {
-      getMedia();
-    }
+    if (!localStream) getMedia();
 
-    // Handle name generation and persistence
     const storedName = localStorage.getItem('userName');
     if (storedName) {
       setName(storedName);
@@ -44,19 +41,33 @@ export default function LobbyPage() {
       localStorage.setItem('userName', newName);
     }
 
-    return () => {
-      if (localStream && !localStream.active) {
-        localStream.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, [localStream, setLocalStream, setName]);
+    if (sdk) {
+      // Set initial state
+      setSocketConnected(sdk.isConnected);
+
+      // Listen for future changes
+      const onConnected = () => setSocketConnected(true);
+      const onDisconnected = () => setSocketConnected(false);
+      sdk.on('connected', onConnected);
+      sdk.on('disconnected', onDisconnected);
+
+      // A robust implementation would also clean up these listeners
+    }
+
+  }, [localStream, setLocalStream, setName, sdk]);
 
   const handleJoin = () => {
-    if (localStream && name) {
+    if (localStream && name && socketConnected) {
       const finalRoomId = roomId || crypto.randomUUID();
       router.push(`/room/${finalRoomId}`);
     }
   };
+
+  const getButtonText = () => {
+      if (!socketConnected) return 'Connecting to server...';
+      if (!localStream) return 'Waiting for media...';
+      return 'Join Room';
+  }
 
   return (
     <div className="lobby-container">
@@ -72,8 +83,8 @@ export default function LobbyPage() {
         value={roomId}
         onChange={(e) => setRoomId(e.target.value)}
       />
-      <button onClick={handleJoin} disabled={!localStream || !name}>
-        Join Room
+      <button onClick={handleJoin} disabled={!localStream || !name || !socketConnected}>
+        {getButtonText()}
       </button>
     </div>
   );

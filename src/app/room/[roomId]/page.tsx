@@ -1,11 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, use } from 'react';
 import { useRouter } from 'next/navigation';
-import io from 'socket.io-client';
-import type { Socket } from 'socket.io-client';
-import { Device } from 'mediasoup-client';
-import { Transport } from 'mediasoup-client/lib/Transport';
 import { useMedia } from '@/context/MediaContext';
 import Controls from '@/components/Controls';
 import VideoPlayer from '@/components/VideoPlayer';
@@ -15,105 +11,70 @@ interface RemoteStream {
   stream: MediaStream;
   name: string;
   socketId: string;
-  isMuted: boolean;
+  isMuted?: boolean;
 }
 
-export default function RoomPage({ params }: { params: { roomId: string } }) {
-  const { roomId } = params;
+export default function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
+  const { roomId } = use(params);
   const router = useRouter();
-  const { localStream, name: localName } = useMedia();
+  const { localStream, name: localName, setLocalStream, sdk } = useMedia();
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
-
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
 
-  const socketRef = useRef<Socket | null>(null);
-  const deviceRef = useRef<Device | undefined>(undefined);
-
   useEffect(() => {
-    if (!localStream) {
+    if (!localStream || !sdk) {
       router.push('/');
       return;
     }
 
-    const socket = io('http://localhost:3000');
-    socketRef.current = socket;
+    sdk.joinRoom(roomId, localStream);
 
-    const setup = async () => {
-      // Join the room
-      socket.emit('join-room', roomId);
-
-      socket.emit('routerRtpCapabilities', async (routerRtpCapabilities: any) => {
-        try {
-          const device = new Device();
-          await device.load({ routerRtpCapabilities });
-          deviceRef.current = device;
-
-          socket.emit('create-transport', { isSender: true }, async (params: any) => {
-            const sendTransport = device.createSendTransport(params);
-            sendTransport.on('connect', ({ dtlsParameters }, cb) => socket.emit('connect-transport', { transportId: sendTransport.id, dtlsParameters }, () => cb()));
-            sendTransport.on('produce', ({ kind, rtpParameters }, cb) => socket.emit('produce', { kind, rtpParameters }, ({ id }: any) => cb({ id })));
-            const videoTrack = localStream.getVideoTracks()[0];
-            if (videoTrack) await sendTransport.produce({ track: videoTrack });
-            const audioTrack = localStream.getAudioTracks()[0];
-            if (audioTrack) await sendTransport.produce({ track: audioTrack });
-          });
-
-          socket.emit('create-transport', { isSender: false }, async (params: any) => {
-            const recvTransport = device.createRecvTransport(params);
-            recvTransport.on('connect', ({ dtlsParameters }, cb) => socket.emit('connect-transport', { transportId: recvTransport.id, dtlsParameters }, () => cb()));
-            
-            socket.on('new-producer', ({ producerId, socketId }) => consume(recvTransport, producerId, socketId));
-            socket.on('existing-producers', (producers) => {
-                for(const { producerId, socketId } of producers) consume(recvTransport, producerId, socketId);
-            });
-          });
-        } catch (error) { console.error(error); }
-      });
+    const handleNewStream = (remoteData: RemoteStream) => {
+      setRemoteStreams(prev => [...prev, remoteData]);
+    };
+    const handleUserLeft = (socketId: string) => {
+      setRemoteStreams(prev => prev.filter(rs => rs.socketId !== socketId));
     };
 
-    const consume = async (transport: Transport, producerId: string, socketId: string) => {
-        const { rtpCapabilities } = deviceRef.current!;
-        socket.emit('consume', { producerId, rtpCapabilities }, async (params: any) => {
-            if (params.error) return console.error(params.error);
-            const consumer = await transport.consume(params);
-            socket.emit('resume-consumer', { consumerId: consumer.id }, () => {});
-            const { track } = consumer;
-            const newStream = new MediaStream([track]);
-            setRemoteStreams(prev => [...prev, { id: consumer.id, stream: newStream, name: `User ${socketId.substring(0, 4)}`, socketId, isMuted: false }]);
-        });
-    }
-
-    socket.on('connect', setup);
-    socket.on('user-mute-status-changed', ({ socketId, muted }) => {
-        setRemoteStreams(prev => prev.map(rs => rs.socketId === socketId ? { ...rs, isMuted: muted } : rs));
-    });
+    sdk.on('new-remote-stream', handleNewStream);
+    sdk.on('remote-user-disconnected', handleUserLeft);
 
     return () => {
-      socket.disconnect();
-      setRemoteStreams([]);
+      sdk.leaveRoom();
+      // We don't remove listeners from the SDK here because the SDK instance is persistent.
+      // A more robust SDK would have a `removeListener` method.
     };
-  }, [localStream, router, roomId]);
+  }, [localStream, roomId, router, sdk]);
 
   const handleMute = () => {
+    const newMutedState = !isMuted;
+    // Toggle local track
     if (localStream) {
-      const newMutedState = !isMuted;
       localStream.getAudioTracks().forEach((track) => (track.enabled = !newMutedState));
-      setIsMuted(newMutedState);
-      socketRef.current?.emit('mute-status-change', { muted: newMutedState });
     }
+    // Toggle remote track via SDK
+    sdk?.toggleMute(newMutedState);
+    // Update UI state
+    setIsMuted(newMutedState);
   };
 
   const handleCameraOff = () => {
+    const newCameraState = !isCameraOff;
+    // Toggle local track
     if (localStream) {
-      localStream.getVideoTracks().forEach((track) => (track.enabled = !track.enabled));
-      setIsCameraOff(!isCameraOff);
+      localStream.getVideoTracks().forEach((track) => (track.enabled = !newCameraState));
     }
+    // Toggle remote track via SDK
+    sdk?.toggleCamera(newCameraState);
+    // Update UI state
+    setIsCameraOff(newCameraState);
   };
 
   const handleLeave = () => {
-    localStream?.getTracks().forEach((track) => track.stop());
-    socketRef.current?.disconnect();
+    sdk?.leaveRoom();
+    localStream?.getTracks().forEach(track => track.stop());
+    setLocalStream(undefined);
     router.push('/');
   };
 
