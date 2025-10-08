@@ -32,16 +32,15 @@ app.prepare().then(async () => {
 
   io.on('connection', (socket) => {
     console.log('a user connected', socket.id);
-    clients[socket.id] = { socket };
+    clients[socket.id] = { socket, consumers: new Map() };
 
     socket.on('join-room', (roomId) => {
       socket.join(roomId);
       clients[socket.id].roomId = roomId;
       console.log(`Socket ${socket.id} joined room ${roomId}`);
 
-      // Inform the new client about existing producers in the room
       const existingProducers = Object.values(clients)
-        .filter(c => c.roomId === roomId && c.producer)
+        .filter(c => c.roomId === roomId && c.producer && c.socket.id !== socket.id)
         .map(c => ({ producerId: c.producer.id, socketId: c.socket.id }));
       socket.emit('existing-producers', existingProducers);
     });
@@ -55,7 +54,7 @@ app.prepare().then(async () => {
       delete clients[socket.id];
     });
 
-    socket.emit('routerRtpCapabilities', router.rtpCapabilities);
+    socket.on('routerRtpCapabilities', (data, callback) => callback(router.rtpCapabilities));
 
     socket.on('create-transport', async ({ isSender }, callback) => {
       try {
@@ -82,7 +81,6 @@ app.prepare().then(async () => {
       try {
         const producer = await transport.produce({ kind, rtpParameters });
         client.producer = producer;
-        // Inform other clients in the same room
         socket.to(client.roomId).emit('new-producer', { producerId: producer.id, socketId: socket.id });
         callback({ id: producer.id });
       } catch (e) { callback({ error: e.message }); }
@@ -101,16 +99,15 @@ app.prepare().then(async () => {
         const transport = clients[socket.id].recvTransport;
         if (!transport) return callback({ error: 'Recv transport not found' });
         const consumer = await transport.consume({ producerId, rtpCapabilities, paused: true });
+        clients[socket.id].consumers.set(consumer.id, consumer);
         callback({ id: consumer.id, producerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters });
       } catch (e) { callback({ error: e.message }); }
     });
 
     socket.on('resume-consumer', async ({ consumerId }, callback) => {
-      const client = clients[socket.id];
-      const transport = client.recvTransport;
-      if (transport) {
-        const consumer = transport.consumers.find(c => c.id === consumerId);
-        if (consumer) await consumer.resume();
+      const consumer = clients[socket.id]?.consumers.get(consumerId);
+      if (consumer) {
+        await consumer.resume();
       }
       callback();
     });

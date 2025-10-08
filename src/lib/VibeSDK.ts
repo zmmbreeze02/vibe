@@ -2,8 +2,9 @@
 
 import io, { Socket } from 'socket.io-client';
 import { Device, types } from 'mediasoup-client';
+import { Participant } from './Participant';
 
-// 类型别名，方便使用
+// 类型别名
 type Transport = types.Transport;
 type Producer = types.Producer;
 type Consumer = types.Consumer;
@@ -34,172 +35,122 @@ class EventEmitter {
   }
 }
 
-/**
- * VibeSDK 类，用于封装所有 WebRTC 和信令逻辑。
- */
 export class VibeSDK extends EventEmitter {
   private socket: Socket | null = null;
   private device: Device | null = null;
   private sendTransport: Transport | null = null;
   private recvTransport: Transport | null = null;
-  private producers: Map<string, Producer> = new Map();
-  private consumers: Map<string, Consumer> = new Map();
+  private participants: Map<string, Participant> = new Map();
+  private localParticipant: Participant | null = null;
 
-  /**
-   * 初始化 SDK 并建立 WebSocket 连接。
-   */
-  constructor() {
-    super();
-    this.init();
-  }
+  constructor() { super(); this.init(); }
 
-  /**
-   * 检查 WebSocket 当前是否已连接。
-   * @returns {boolean} 如果已连接则返回 true，否则返回 false。
-   */
-  public get isConnected(): boolean {
-    return this.socket?.connected || false;
-  }
+  public get isConnected(): boolean { return this.socket?.connected || false; }
 
-  /**
-   * 初始化 socket 连接并设置基础的事件监听器。
-   */
   private init() {
     this.socket = io('http://localhost:3000');
-    this.socket.on('connect', () => {
-      console.log('SDK: Socket connected');
-      this.emit('connected');
-    });
-    this.socket.on('disconnect', () => {
-      console.log('SDK: Socket disconnected');
-      this.emit('disconnected');
-    });
-
-    this.listenForRemoteProducers();
+    this.socket.on('connect', () => this.emit('connected'));
+    this.socket.on('disconnect', () => this.emit('disconnected'));
   }
 
-  /**
-   * 加入一个房间，初始化 Mediasoup device，创建 transports，并开始生产媒体流。
-   * @param {string} roomId - 要加入的房间 ID。
-   * @param {MediaStream} localStream - 用户的本地媒体流。
-   */
-  async joinRoom(roomId: string, localStream: MediaStream) {
-    if (!this.socket) return console.error('Socket not initialized');
+  async joinRoom(roomId: string, name: string, localStream: MediaStream) {
+    if (!this.socket) return;
 
-    this.socket.emit('join-room', roomId);
+    this.localParticipant = new Participant(this.socket.id!, name, true);
+    this.participants.set(this.socket.id!, this.localParticipant);
 
-    const routerRtpCapabilities = await this.socket.emitWithAck('routerRtpCapabilities');
-    this.device = new Device();
-    await this.device.load({ routerRtpCapabilities });
-    console.log('SDK: Device loaded');
+    const joinLogic = async () => {
+      this.socket!.emit('join-room', roomId);
+      const routerRtpCapabilities = await this.socket!.emitWithAck('routerRtpCapabilities');
+      this.device = new Device();
+      await this.device.load({ routerRtpCapabilities });
 
-    await this.initTransports(localStream);
+      await this.initTransports(localStream);
+      this.listenForRoomEvents();
+    };
+
+    if (this.socket.connected) joinLogic();
+    else this.socket.once('connect', joinLogic);
   }
 
-  /**
-   * 创建发送和接收 transport，并开始生产媒体流。
-   * @param {MediaStream} localStream - 用户的本地媒体流。
-   */
   private async initTransports(localStream: MediaStream) {
-    if (!this.socket || !this.device) return;
+    if (!this.socket || !this.device || !this.localParticipant) return;
 
-    // 创建发送 transport
-    const sendTransportParams = await this.socket.emitWithAck('create-transport', { isSender: true });
-    this.sendTransport = this.device.createSendTransport(sendTransportParams);
+    const sendParams = await this.socket.emitWithAck('create-transport', { isSender: true });
+    this.sendTransport = this.device.createSendTransport(sendParams);
     this.sendTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.sendTransport?.id, dtlsParameters }, () => cb()));
     this.sendTransport.on('produce', ({ kind, rtpParameters }, cb) => this.socket?.emit('produce', { kind, rtpParameters }, ({ id }: any) => cb({ id })));
 
-    // 创建接收 transport
-    const recvTransportParams = await this.socket.emitWithAck('create-transport', { isSender: false });
-    this.recvTransport = this.device.createRecvTransport(recvTransportParams);
+    const recvParams = await this.socket.emitWithAck('create-transport', { isSender: false });
+    this.recvTransport = this.device.createRecvTransport(recvParams);
     this.recvTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.recvTransport?.id, dtlsParameters }, () => cb()));
 
-    // 生产本地媒体
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack) {
-      const videoProducer = await this.sendTransport.produce({ track: videoTrack });
-      this.producers.set('video', videoProducer);
-    }
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-      const audioProducer = await this.sendTransport.produce({ track: audioTrack });
-      this.producers.set('audio', audioProducer);
+    for (const track of localStream.getTracks()) {
+      const producer = await this.sendTransport.produce({ track });
+      this.localParticipant.producers.set(track.kind, producer);
     }
   }
 
-  /**
-   * 设置监听器，用于处理房间中其他客户端的新生产者。
-   */
-  private listenForRemoteProducers() {
-    this.socket?.on('new-producer', ({ producerId, socketId }) => this.consume(producerId, socketId));
+  private listenForRoomEvents() {
     this.socket?.on('existing-producers', (producers) => {
-      for (const { producerId, socketId } of producers) this.consume(producerId, socketId);
+      for (const { producerId, socketId, name } of producers) this.consume({ producerId, socketId, name });
+    });
+    this.socket?.on('new-producer', ({ producerId, socketId, name }) => {
+      this.consume({ producerId, socketId, name });
     });
     this.socket?.on('user-disconnected', ({ socketId }) => {
-      console.log(`User ${socketId} disconnected`);
-      this.emit('remote-user-disconnected', socketId);
+      const participant = this.participants.get(socketId);
+      if (participant) {
+        this.emit('participant-left', participant);
+        this.participants.delete(socketId);
+      }
+    });
+    this.socket?.on('user-mute-status-changed', ({ socketId, muted }) => {
+        const participant = this.participants.get(socketId);
+        if(participant) {
+            participant.setMute(muted);
+            this.emit('participant-updated', participant);
+        }
     });
   }
 
-  /**
-   * 为一个远程生产者创建消费者，以接收其媒体流。
-   * @param {string} producerId - 要消费的远程生产者 ID。
-   * @param {string} socketId - 远程用户的 socket ID。
-   */
-  private async consume(producerId: string, socketId: string) {
+  private async consume({ producerId, socketId, name }: { producerId: string, socketId: string, name: string }) {
     if (!this.device || !this.recvTransport || !this.socket) return;
+
     const { rtpCapabilities } = this.device;
     const params = await this.socket.emitWithAck('consume', { producerId, rtpCapabilities });
-    if (params.error) return console.error('Cannot consume', params.error);
     const consumer = await this.recvTransport.consume(params);
-    this.consumers.set(consumer.id, consumer);
     this.socket.emit('resume-consumer', { consumerId: consumer.id });
-    const { track } = consumer;
-    const stream = new MediaStream([track]);
-    this.emit('new-remote-stream', { id: consumer.id, stream, name: `User ${socketId.substring(0, 4)}`, socketId });
+
+    let participant = this.participants.get(socketId);
+    if (!participant) {
+      participant = new Participant(socketId, name);
+      this.participants.set(socketId, participant);
+      this.emit('participant-joined', participant);
+    }
+    participant.consumers.set(consumer.id, consumer);
+    participant.addTrack(consumer.track);
   }
 
-  /**
-   * 切换本地用户的麦克风静音状态。
-   * @param {boolean} isMuted - 期望的静音状态。
-   */
   toggleMute(isMuted: boolean) {
-    const audioProducer = this.producers.get('audio');
-    if (audioProducer) {
-      isMuted ? audioProducer.pause() : audioProducer.resume();
-      this.socket?.emit('mute-status-change', { muted: isMuted });
-    }
+    this.localParticipant?.producers.get('audio')?.pause();
+    if(isMuted) this.localParticipant?.producers.get('audio')?.pause();
+    else this.localParticipant?.producers.get('audio')?.resume();
+    this.socket?.emit('mute-status-change', { muted: isMuted });
+    this.localParticipant?.setMute(isMuted);
   }
 
-  /**
-   * 切换本地用户的摄像头开关状态。
-   * @param {boolean} isCameraOff - 期望的摄像头关闭状态。
-   */
   toggleCamera(isCameraOff: boolean) {
-    const videoProducer = this.producers.get('video');
-    if (videoProducer) {
-      isCameraOff ? videoProducer.pause() : videoProducer.resume();
-    }
+    if(isCameraOff) this.localParticipant?.producers.get('video')?.pause();
+    else this.localParticipant?.producers.get('video')?.resume();
   }
 
-  /**
-   * 清理当前房间所有与媒体相关的对象，但不会断开 socket 连接。
-   */
   leaveRoom() {
     this.sendTransport?.close();
     this.recvTransport?.close();
-    this.producers.forEach(p => p.close());
-    this.consumers.forEach(c => c.close());
-    this.producers.clear();
-    this.consumers.clear();
-    this.sendTransport = null;
-    this.recvTransport = null;
+    this.localParticipant = null;
+    this.participants.clear();
   }
 
-  /**
-   * 强制断开 WebSocket 连接。
-   */
-  disconnect() {
-    this.socket?.disconnect();
-  }
+  disconnect() { this.socket?.disconnect(); }
 }

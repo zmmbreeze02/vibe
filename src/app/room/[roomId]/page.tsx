@@ -1,73 +1,68 @@
 'use client';
 
-import { useState, useEffect, use } from 'react';
+import { useState, useEffect, use, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMedia } from '@/context/MediaContext';
+import { VibeSDK } from '@/lib/VibeSDK';
+import { Participant } from '@/lib/Participant';
 import Controls from '@/components/Controls';
 import VideoPlayer from '@/components/VideoPlayer';
-
-interface RemoteStream {
-  id: string;
-  stream: MediaStream;
-  name: string;
-  socketId: string;
-  isMuted?: boolean;
-}
 
 export default function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
   const { roomId } = use(params);
   const router = useRouter();
   const { localStream, name: localName, setLocalStream, sdk } = useMedia();
-  const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
 
   useEffect(() => {
-    if (!localStream || !sdk) {
+    if (!localStream || !sdk || !localName) {
       router.push('/');
       return;
     }
 
-    sdk.joinRoom(roomId, localStream);
+    const localParticipant = new Participant(sdk.socket.id!, localName, true);
+    localParticipant.stream = localStream;
+    setParticipants([localParticipant]);
 
-    const handleNewStream = (remoteData: RemoteStream) => {
-      setRemoteStreams(prev => [...prev, remoteData]);
-    };
-    const handleUserLeft = (socketId: string) => {
-      setRemoteStreams(prev => prev.filter(rs => rs.socketId !== socketId));
+    sdk.joinRoom(roomId, localName, localStream);
+
+    const handleParticipantJoined = (participant: Participant) => {
+      console.log('Participant joined:', participant);
+      setParticipants(prev => [...prev, participant]);
     };
 
-    sdk.on('new-remote-stream', handleNewStream);
-    sdk.on('remote-user-disconnected', handleUserLeft);
+    const handleParticipantLeft = (participant: Participant) => {
+      console.log('Participant left:', participant);
+      setParticipants(prev => prev.filter(p => p.id !== participant.id));
+    };
+
+    const handleParticipantUpdated = (participant: Participant) => {
+        setParticipants(prev => prev.map(p => p.id === participant.id ? participant : p));
+    };
+
+    sdk.on('participant-joined', handleParticipantJoined);
+    sdk.on('participant-left', handleParticipantLeft);
+    sdk.on('participant-updated', handleParticipantUpdated);
 
     return () => {
       sdk.leaveRoom();
-      // We don't remove listeners from the SDK here because the SDK instance is persistent.
-      // A more robust SDK would have a `removeListener` method.
+      // In a real app, you'd need sdk.off(...) to remove listeners
     };
-  }, [localStream, roomId, router, sdk]);
+  }, [localStream, localName, roomId, router, sdk]);
 
   const handleMute = () => {
     const newMutedState = !isMuted;
-    // Toggle local track
-    if (localStream) {
-      localStream.getAudioTracks().forEach((track) => (track.enabled = !newMutedState));
-    }
-    // Toggle remote track via SDK
+    localStream?.getAudioTracks().forEach((track) => (track.enabled = !newMutedState));
     sdk?.toggleMute(newMutedState);
-    // Update UI state
     setIsMuted(newMutedState);
   };
 
   const handleCameraOff = () => {
     const newCameraState = !isCameraOff;
-    // Toggle local track
-    if (localStream) {
-      localStream.getVideoTracks().forEach((track) => (track.enabled = !newCameraState));
-    }
-    // Toggle remote track via SDK
+    localStream?.getVideoTracks().forEach((track) => (track.enabled = !newCameraState));
     sdk?.toggleCamera(newCameraState);
-    // Update UI state
     setIsCameraOff(newCameraState);
   };
 
@@ -81,9 +76,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   return (
     <div className="room-container">
       <div className="videos-grid">
-        <VideoPlayer stream={localStream} name={`${localName} (You)`} isLocal={true} isMuted={isMuted} />
-        {remoteStreams.map(rs => (
-          <VideoPlayer key={rs.id} stream={rs.stream} name={rs.name} isMuted={rs.isMuted} />
+        {participants.map(p => (
+          <VideoPlayer key={p.id} stream={p.stream} name={p.isLocal ? `${p.name} (You)` : p.name} isLocal={p.isLocal} isMuted={p.isMuted} />
         ))}
       </div>
       <Controls
