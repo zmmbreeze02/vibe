@@ -16,41 +16,45 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
 
+  const handleParticipantJoined = useCallback((participant: Participant) => {
+    console.log('[UI-DEBUG] Participant joined event received:', participant.name);
+    setParticipants(prev => {
+      // Defensive check to prevent adding duplicates
+      if (prev.some(p => p.id === participant.id)) {
+        console.warn('[UI-WARN] Attempted to add duplicate participant:', participant.name);
+        return prev;
+      }
+      return [...prev, participant];
+    });
+  }, []);
+
+  const handleParticipantLeft = useCallback((participant: Participant) => {
+    console.log('[UI-DEBUG] Participant left:', participant.name);
+    setParticipants(prev => prev.filter(p => p.id !== participant.id));
+  }, []);
+
   useEffect(() => {
     if (!localStream || !sdk || !localName) {
       router.push('/');
       return;
     }
 
-    const localParticipant = new Participant(sdk.socket.id!, localName, true);
-    localParticipant.stream = localStream;
-    setParticipants([localParticipant]);
+    const handleReady = (localParticipant: Participant) => {
+        localParticipant.stream = localStream;
+        setParticipants([localParticipant]);
+    };
+
+    sdk.on('ready', handleReady);
+    sdk.on('participant-joined', handleParticipantJoined);
+    sdk.on('participant-left', handleParticipantLeft);
 
     sdk.joinRoom(roomId, localName, localStream);
 
-    const handleParticipantJoined = (participant: Participant) => {
-      console.log('Participant joined:', participant);
-      setParticipants(prev => [...prev, participant]);
-    };
-
-    const handleParticipantLeft = (participant: Participant) => {
-      console.log('Participant left:', participant);
-      setParticipants(prev => prev.filter(p => p.id !== participant.id));
-    };
-
-    const handleParticipantUpdated = (participant: Participant) => {
-        setParticipants(prev => prev.map(p => p.id === participant.id ? participant : p));
-    };
-
-    sdk.on('participant-joined', handleParticipantJoined);
-    sdk.on('participant-left', handleParticipantLeft);
-    sdk.on('participant-updated', handleParticipantUpdated);
-
     return () => {
       sdk.leaveRoom();
-      // In a real app, you'd need sdk.off(...) to remove listeners
+      // In a real app, you'd need to remove listeners via sdk.off()
     };
-  }, [localStream, localName, roomId, router, sdk]);
+  }, [localStream, localName, roomId, router, sdk, handleParticipantJoined, handleParticipantLeft]);
 
   const handleMute = () => {
     const newMutedState = !isMuted;
@@ -73,6 +77,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     router.push('/');
   };
 
+  const handleShareScreen = () => {
+    sdk?.startScreenShare();
+  };
+
   return (
     <div className="room-container">
       <div className="videos-grid">
@@ -86,6 +94,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         onMute={handleMute}
         onCameraOff={handleCameraOff}
         onLeave={handleLeave}
+        onShareScreen={handleShareScreen}
       />
     </div>
   );

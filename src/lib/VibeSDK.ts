@@ -4,35 +4,14 @@ import io, { Socket } from 'socket.io-client';
 import { Device, types } from 'mediasoup-client';
 import { Participant } from './Participant';
 
-// 类型别名
 type Transport = types.Transport;
 type Producer = types.Producer;
 type Consumer = types.Consumer;
 
-/**
- * 一个简单的 EventEmitter 类，让 SDK 可以派发事件。
- */
 class EventEmitter {
   private events: { [key: string]: Function[] } = {};
-
-  /**
-   * 订阅一个事件。
-   * @param {string} event - 事件名称。
-   * @param {Function} listener - 回调函数。
-   */
-  on(event: string, listener: Function) {
-    if (!this.events[event]) this.events[event] = [];
-    this.events[event].push(listener);
-  }
-
-  /**
-   * 派发一个事件。
-   * @param {string} event - 事件名称。
-   * @param {any[]} args - 传递给监听器的参数。
-   */
-  emit(event: string, ...args: any[]) {
-    this.events[event]?.forEach(listener => listener(...args));
-  }
+  on(event: string, listener: Function) { if (!this.events[event]) this.events[event] = []; this.events[event].push(listener); }
+  emit(event: string, ...args: any[]) { this.events[event]?.forEach(listener => listener(...args)); }
 }
 
 export class VibeSDK extends EventEmitter {
@@ -40,8 +19,11 @@ export class VibeSDK extends EventEmitter {
   private device: Device | null = null;
   private sendTransport: Transport | null = null;
   private recvTransport: Transport | null = null;
+  private producers: Map<string, Producer> = new Map();
+  private consumers: Map<string, Consumer> = new Map();
   private participants: Map<string, Participant> = new Map();
   private localParticipant: Participant | null = null;
+  private cameraTrack: MediaStreamTrack | null = null;
 
   constructor() { super(); this.init(); }
 
@@ -53,41 +35,54 @@ export class VibeSDK extends EventEmitter {
     this.socket.on('disconnect', () => this.emit('disconnected'));
   }
 
-  async joinRoom(roomId: string, name: string, localStream: MediaStream) {
+  joinRoom(roomId: string, name: string, localStream: MediaStream) {
     if (!this.socket) return;
 
-    this.localParticipant = new Participant(this.socket.id!, name, true);
-    this.participants.set(this.socket.id!, this.localParticipant);
+    const joinLogic = () => {
+      this.localParticipant = new Participant(this.socket!.id, name, true);
+      this.participants.set(this.socket!.id, this.localParticipant);
+      this.cameraTrack = localStream.getVideoTracks()[0];
 
-    const joinLogic = async () => {
       this.socket!.emit('join-room', roomId);
-      const routerRtpCapabilities = await this.socket!.emitWithAck('routerRtpCapabilities');
-      this.device = new Device();
-      await this.device.load({ routerRtpCapabilities });
-
-      await this.initTransports(localStream);
-      this.listenForRoomEvents();
+      this.socket!.emit('routerRtpCapabilities', {}, async (routerRtpCapabilities: any) => {
+        this.device = new Device();
+        await this.device.load({ routerRtpCapabilities });
+        await this.initTransports(localStream, name);
+        this.listenForRoomEvents();
+        this.emit('ready', this.localParticipant);
+      });
     };
 
     if (this.socket.connected) joinLogic();
     else this.socket.once('connect', joinLogic);
   }
 
-  private async initTransports(localStream: MediaStream) {
-    if (!this.socket || !this.device || !this.localParticipant) return;
+  private async initTransports(localStream: MediaStream, name: string) {
+    if (!this.socket || !this.device) return;
 
-    const sendParams = await this.socket.emitWithAck('create-transport', { isSender: true });
-    this.sendTransport = this.device.createSendTransport(sendParams);
-    this.sendTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.sendTransport?.id, dtlsParameters }, () => cb()));
-    this.sendTransport.on('produce', ({ kind, rtpParameters }, cb) => this.socket?.emit('produce', { kind, rtpParameters }, ({ id }: any) => cb({ id })));
+    await new Promise<void>(resolve => {
+        this.socket!.emit('create-transport', { isSender: true }, (params: any) => {
+            this.sendTransport = this.device!.createSendTransport(params);
+            this.sendTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.sendTransport?.id, dtlsParameters }, () => cb()));
+            this.sendTransport.on('produce', ({ kind, rtpParameters }, cb) => {
+        console.log(`[SDK-DEBUG] Emitting produce for ${kind} with name: ${name}`);
+        this.socket?.emit('produce', { kind, rtpParameters, appData: { name } }, ({ id }: any) => cb({ id }));
+      });
+            resolve();
+        });
+    });
 
-    const recvParams = await this.socket.emitWithAck('create-transport', { isSender: false });
-    this.recvTransport = this.device.createRecvTransport(recvParams);
-    this.recvTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.recvTransport?.id, dtlsParameters }, () => cb()));
+    await new Promise<void>(resolve => {
+        this.socket!.emit('create-transport', { isSender: false }, (params: any) => {
+            this.recvTransport = this.device!.createRecvTransport(params);
+            this.recvTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.recvTransport?.id, dtlsParameters }, () => cb()));
+            resolve();
+        });
+    });
 
     for (const track of localStream.getTracks()) {
-      const producer = await this.sendTransport.produce({ track });
-      this.localParticipant.producers.set(track.kind, producer);
+        const producer = await this.sendTransport!.produce({ track });
+        this.producers.set(track.kind, producer);
     }
   }
 
@@ -114,40 +109,73 @@ export class VibeSDK extends EventEmitter {
     });
   }
 
-  private async consume({ producerId, socketId, name }: { producerId: string, socketId: string, name: string }) {
+  private consume({ producerId, socketId, name }: { producerId: string, socketId: string, name: string }) {
+    console.log(`[SDK-DEBUG] Consume called for socketId ${socketId} with name: ${name}`);
     if (!this.device || !this.recvTransport || !this.socket) return;
 
     const { rtpCapabilities } = this.device;
-    const params = await this.socket.emitWithAck('consume', { producerId, rtpCapabilities });
-    const consumer = await this.recvTransport.consume(params);
-    this.socket.emit('resume-consumer', { consumerId: consumer.id });
+    this.socket.emit('consume', { producerId, rtpCapabilities }, async (params: any) => {
+      if (params.error) return console.error('Cannot consume', params.error);
+      
+      const consumer = await this.recvTransport!.consume(params);
+      this.consumers.set(consumer.id, consumer);
 
-    let participant = this.participants.get(socketId);
-    if (!participant) {
-      participant = new Participant(socketId, name);
-      this.participants.set(socketId, participant);
-      this.emit('participant-joined', participant);
+      let participant = this.participants.get(socketId);
+      if (!participant) {
+        participant = new Participant(socketId, name);
+        this.participants.set(socketId, participant);
+        participant.addTrack(consumer.track);
+        this.emit('participant-joined', participant);
+      } else {
+        participant.addTrack(consumer.track);
+        this.emit('participant-updated', participant);
+      }
+
+      this.socket!.emit('resume-consumer', { consumerId: consumer.id }, () => {});
+    });
+  }
+
+  async startScreenShare() {
+    if (!this.sendTransport) return;
+    const videoProducer = this.producers.get('video');
+    if (!videoProducer) return;
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const screenTrack = screenStream.getVideoTracks()[0];
+      await videoProducer.replaceTrack({ track: screenTrack });
+      screenTrack.onended = () => this.stopScreenShare();
+    } catch (error) {
+      console.error('Error starting screen share:', error);
     }
-    participant.consumers.set(consumer.id, consumer);
-    participant.addTrack(consumer.track);
+  }
+
+  async stopScreenShare() {
+    if (!this.cameraTrack) return;
+    const videoProducer = this.producers.get('video');
+    if (!videoProducer) return;
+    await videoProducer.replaceTrack({ track: this.cameraTrack });
   }
 
   toggleMute(isMuted: boolean) {
-    this.localParticipant?.producers.get('audio')?.pause();
-    if(isMuted) this.localParticipant?.producers.get('audio')?.pause();
-    else this.localParticipant?.producers.get('audio')?.resume();
-    this.socket?.emit('mute-status-change', { muted: isMuted });
+    const producer = this.producers.get('audio');
+    if (producer) { isMuted ? producer.pause() : producer.resume(); this.socket?.emit('mute-status-change', { muted: isMuted }); }
     this.localParticipant?.setMute(isMuted);
   }
 
   toggleCamera(isCameraOff: boolean) {
-    if(isCameraOff) this.localParticipant?.producers.get('video')?.pause();
-    else this.localParticipant?.producers.get('video')?.resume();
+    const producer = this.producers.get('video');
+    if (producer) { isCameraOff ? producer.pause() : producer.resume(); }
   }
 
   leaveRoom() {
     this.sendTransport?.close();
     this.recvTransport?.close();
+    this.producers.forEach(p => p.close());
+    this.consumers.forEach(c => c.close());
+    this.producers.clear();
+    this.consumers.clear();
+    this.sendTransport = null;
+    this.recvTransport = null;
     this.localParticipant = null;
     this.participants.clear();
   }

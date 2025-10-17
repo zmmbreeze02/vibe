@@ -31,22 +31,24 @@ app.prepare().then(async () => {
   const io = new socketIO.Server(httpServer, { cors: { origin: '*' } });
 
   io.on('connection', (socket) => {
-    console.log('a user connected', socket.id);
+    console.log(`[INFO] User connected: ${socket.id}`);
     clients[socket.id] = { socket, consumers: new Map() };
 
     socket.on('join-room', (roomId) => {
       socket.join(roomId);
       clients[socket.id].roomId = roomId;
-      console.log(`Socket ${socket.id} joined room ${roomId}`);
+      console.log(`[INFO] Socket ${socket.id} joined room ${roomId}`);
 
       const existingProducers = Object.values(clients)
         .filter(c => c.roomId === roomId && c.producer && c.socket.id !== socket.id)
-        .map(c => ({ producerId: c.producer.id, socketId: c.socket.id }));
+        .map(c => ({ producerId: c.producer.id, socketId: c.socket.id, name: c.name }));
+      
+      console.log(`[DEBUG] Emitting existing-producers to ${socket.id}:`, existingProducers.map(p=>p.producerId));
       socket.emit('existing-producers', existingProducers);
     });
 
     socket.on('disconnect', () => {
-      console.log('user disconnected', socket.id);
+      console.log(`[INFO] User disconnected: ${socket.id}`);
       const { roomId } = clients[socket.id] || {};
       if (roomId) {
         socket.to(roomId).emit('user-disconnected', { socketId: socket.id });
@@ -54,7 +56,9 @@ app.prepare().then(async () => {
       delete clients[socket.id];
     });
 
-    socket.on('routerRtpCapabilities', (data, callback) => callback(router.rtpCapabilities));
+    socket.on('routerRtpCapabilities', (data, callback) => {
+        callback(router.rtpCapabilities);
+    });
 
     socket.on('create-transport', async ({ isSender }, callback) => {
       try {
@@ -74,14 +78,17 @@ app.prepare().then(async () => {
       } catch (e) { callback({ error: e.message }); }
     });
 
-    socket.on('produce', async ({ kind, rtpParameters }, callback) => {
+    socket.on('produce', async ({ kind, rtpParameters, appData }, callback) => {
       const client = clients[socket.id];
       const transport = client.sendTransport;
       if (!transport) return callback({ error: 'Send transport not found' });
       try {
-        const producer = await transport.produce({ kind, rtpParameters });
+        console.log(`[DEBUG] Received produce request from ${socket.id} with name: ${appData?.name}`);
+        const producer = await transport.produce({ kind, rtpParameters, appData: { ...appData, socketId: socket.id } });
         client.producer = producer;
-        socket.to(client.roomId).emit('new-producer', { producerId: producer.id, socketId: socket.id });
+        client.name = appData.name;
+        console.log(`[INFO] Producer created for ${socket.id}, broadcasting new-producer`);
+        socket.to(client.roomId).emit('new-producer', { producerId: producer.id, socketId: socket.id, name: client.name });
         callback({ id: producer.id });
       } catch (e) { callback({ error: e.message }); }
     });
@@ -94,20 +101,31 @@ app.prepare().then(async () => {
     });
 
     socket.on('consume', async ({ producerId, rtpCapabilities }, callback) => {
+      console.log(`[DEBUG] Received consume request for producer ${producerId} from ${socket.id}`);
       try {
-        if (!router.canConsume({ producerId, rtpCapabilities })) return callback({ error: 'Cannot consume' });
+        if (!router.canConsume({ producerId, rtpCapabilities })) {
+            console.error(`[ERROR] Socket ${socket.id} cannot consume producer ${producerId}`);
+            return callback({ error: 'Cannot consume' });
+        }
         const transport = clients[socket.id].recvTransport;
         if (!transport) return callback({ error: 'Recv transport not found' });
+
         const consumer = await transport.consume({ producerId, rtpCapabilities, paused: true });
         clients[socket.id].consumers.set(consumer.id, consumer);
+        console.log(`[INFO] Consumer created for ${socket.id}: ${consumer.id}`);
         callback({ id: consumer.id, producerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters });
-      } catch (e) { callback({ error: e.message }); }
+      } catch (e) { 
+          console.error('[ERROR] Consume error:', e);
+          callback({ error: e.message }); 
+        }
     });
 
     socket.on('resume-consumer', async ({ consumerId }, callback) => {
+      console.log(`[DEBUG] Received resume request for consumer ${consumerId}`);
       const consumer = clients[socket.id]?.consumers.get(consumerId);
       if (consumer) {
         await consumer.resume();
+        console.log(`[INFO] Consumer resumed: ${consumerId}`);
       }
       callback();
     });
