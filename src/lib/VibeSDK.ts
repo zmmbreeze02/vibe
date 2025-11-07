@@ -133,6 +133,15 @@ export class VibeSDK extends EventEmitter {
   private consume({ producerId, socketId, name, isScreenShare }: { producerId: string, socketId: string, name: string, isScreenShare: boolean }) {
     if (!this.device || !this.recvTransport || !this.socket) return;
 
+    // Synchronously check for and create the participant if they don't exist.
+    // This prevents a race condition when multiple producers (audio/video) are consumed at once.
+    let participant = this.participants.get(socketId);
+    if (!participant && !isScreenShare) {
+      participant = new Participant(socketId, name);
+      this.participants.set(socketId, participant);
+      this.emit('participant-joined', participant);
+    }
+
     const { rtpCapabilities } = this.device;
     this.socket.emit('consume', { producerId, rtpCapabilities }, async (params: any) => {
       if (params.error) return console.error('Cannot consume', params.error);
@@ -151,15 +160,13 @@ export class VibeSDK extends EventEmitter {
         return;
       }
 
-      let participant = this.participants.get(socketId);
-      if (!participant) {
-        participant = new Participant(socketId, name);
-        this.participants.set(socketId, participant);
-        this.emit('participant-joined', participant);
+      // Get the participant again inside the async callback to ensure we have the correct instance
+      const existingParticipant = this.participants.get(socketId);
+      if (existingParticipant) {
+        existingParticipant.addTrack(consumer.track);
+        existingParticipant.consumers.set(consumer.id, consumer);
+        this.emit('participant-updated', existingParticipant);
       }
-      participant.addTrack(consumer.track);
-      participant.consumers.set(consumer.id, consumer);
-      this.emit('participant-updated', participant);
     });
   }
 
