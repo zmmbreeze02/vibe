@@ -18,7 +18,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [isCameraOff, setIsCameraOff] = useState(false);
 
   const handleParticipantJoined = useCallback((participant: Participant) => {
-    setParticipants(prev => [...prev, participant]);
+    setParticipants(prev => {
+      if (prev.some(p => p.id === participant.id)) {
+        return prev; // Already exists, do nothing
+      }
+      return [...prev, participant];
+    });
   }, []);
 
   const handleParticipantLeft = useCallback((participant: Participant) => {
@@ -26,7 +31,15 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   }, []);
 
   const handleParticipantUpdated = useCallback((participant: Participant) => {
-    setParticipants(prev => prev.map(p => p.id === participant.id ? participant : p));
+    setParticipants(prev => {
+      if (prev.some(p => p.id === participant.id)) {
+        // If participant exists, update it
+        return prev.map(p => (p.id === participant.id ? participant : p));
+      } else {
+        // If participant does not exist, add it (handles race conditions)
+        return [...prev, participant];
+      }
+    });
   }, []);
 
   const handleScreenShareStarted = useCallback((participant: Participant) => {
