@@ -101,10 +101,9 @@ app.prepare().then(async () => {
     });
 
     socket.on('consume', async ({ producerId, rtpCapabilities }, callback) => {
-      console.log(`[DEBUG] Received consume request for producer ${producerId} from ${socket.id}`);
       try {
         if (!router.canConsume({ producerId, rtpCapabilities })) {
-            console.error(`[ERROR] Socket ${socket.id} cannot consume producer ${producerId}`);
+            console.error(`Cannot consume`);
             return callback({ error: 'Cannot consume' });
         }
         const transport = clients[socket.id].recvTransport;
@@ -112,20 +111,17 @@ app.prepare().then(async () => {
 
         const consumer = await transport.consume({ producerId, rtpCapabilities, paused: true });
         clients[socket.id].consumers.set(consumer.id, consumer);
-        console.log(`[INFO] Consumer created for ${socket.id}: ${consumer.id}`);
         callback({ id: consumer.id, producerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters });
       } catch (e) { 
-          console.error('[ERROR] Consume error:', e);
+          console.error('Consume error:', e);
           callback({ error: e.message }); 
         }
     });
 
     socket.on('resume-consumer', async ({ consumerId }, callback) => {
-      console.log(`[DEBUG] Received resume request for consumer ${consumerId}`);
       const consumer = clients[socket.id]?.consumers.get(consumerId);
       if (consumer) {
         await consumer.resume();
-        console.log(`[INFO] Consumer resumed: ${consumerId}`);
       }
       callback();
     });

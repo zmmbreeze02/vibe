@@ -17,16 +17,35 @@ const MuteIcon = () => (
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({ stream, name, isLocal, isMuted }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [videoStream, setVideoStream] = useState<MediaStream | undefined>(stream);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-    }
+    setVideoStream(stream);
+
+    const handleTrack = () => {
+      // When a new track is added, create a new MediaStream object
+      // to force a re-render of the video component.
+      if (stream) {
+        setVideoStream(new MediaStream(stream.getTracks()));
+      }
+    };
+
+    stream?.addEventListener('addtrack', handleTrack);
+
+    return () => {
+      stream?.removeEventListener('addtrack', handleTrack);
+    };
   }, [stream]);
+
+  useEffect(() => {
+    if (videoRef.current && videoStream) {
+      videoRef.current.srcObject = videoStream;
+    }
+  }, [videoStream]);
 
   return (
     <div className="video-container">
-      <video ref={videoRef} autoPlay playsInline muted className={isLocal ? 'mirrored' : ''} />
+      <video ref={videoRef} autoPlay playsInline muted={isLocal} className={isLocal ? 'mirrored' : ''} />
       <div className="video-overlay">
         <div className="video-name">{name}</div>
         {isMuted && <div className="video-mute-icon"><MuteIcon /></div>}

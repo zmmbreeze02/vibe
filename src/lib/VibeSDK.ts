@@ -43,12 +43,14 @@ export class VibeSDK extends EventEmitter {
       this.participants.set(this.socket!.id, this.localParticipant);
       this.cameraTrack = localStream.getVideoTracks()[0];
 
+      // Listen for events before joining the room to avoid race conditions
+      this.listenForRoomEvents();
+
       this.socket!.emit('join-room', roomId);
       this.socket!.emit('routerRtpCapabilities', {}, async (routerRtpCapabilities: any) => {
         this.device = new Device();
         await this.device.load({ routerRtpCapabilities });
         await this.initTransports(localStream, name);
-        this.listenForRoomEvents();
         this.emit('ready', this.localParticipant);
       });
     };
@@ -110,12 +112,14 @@ export class VibeSDK extends EventEmitter {
   }
 
   private consume({ producerId, socketId, name }: { producerId: string, socketId: string, name: string }) {
-    console.log(`[SDK-DEBUG] Consume called for socketId ${socketId} with name: ${name}`);
     if (!this.device || !this.recvTransport || !this.socket) return;
 
     const { rtpCapabilities } = this.device;
     this.socket.emit('consume', { producerId, rtpCapabilities }, async (params: any) => {
-      if (params.error) return console.error('Cannot consume', params.error);
+      if (params.error) {
+        console.error('Cannot consume', params.error);
+        return;
+      }
       
       const consumer = await this.recvTransport!.consume(params);
       this.consumers.set(consumer.id, consumer);
