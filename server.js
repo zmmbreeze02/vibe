@@ -64,6 +64,15 @@ app.prepare().then(async () => {
       try {
         const transport = await router.createWebRtcTransport({ listenIps: [{ ip: '127.0.0.1' }], enableUdp: true });
         clients[socket.id][isSender ? 'sendTransport' : 'recvTransport'] = transport;
+
+        transport.on('producerclose', (producer) => {
+          const client = clients[socket.id];
+          if (client && client.roomId) {
+            console.log(`[INFO] Producer ${producer.id} closed, broadcasting to room ${client.roomId}`);
+            socket.to(client.roomId).emit('producer-closed', { producerId: producer.id });
+          }
+        });
+
         callback({ id: transport.id, iceParameters: transport.iceParameters, iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters });
       } catch (e) { callback({ error: e.message }); }
     });
@@ -85,10 +94,20 @@ app.prepare().then(async () => {
       try {
         console.log(`[DEBUG] Received produce request from ${socket.id} with name: ${appData?.name}`);
         const producer = await transport.produce({ kind, rtpParameters, appData: { ...appData, socketId: socket.id } });
-        client.producer = producer;
-        client.name = appData.name;
+        
+        // If this is a regular video/audio producer, store it on the client
+        if (!appData.isScreenShare) {
+          client.producer = producer;
+          client.name = appData.name;
+        }
+
         console.log(`[INFO] Producer created for ${socket.id}, broadcasting new-producer`);
-        socket.to(client.roomId).emit('new-producer', { producerId: producer.id, socketId: socket.id, name: client.name });
+        socket.to(client.roomId).emit('new-producer', { 
+          producerId: producer.id, 
+          socketId: socket.id, 
+          name: appData.name, 
+          isScreenShare: !!appData.isScreenShare 
+        });
         callback({ id: producer.id });
       } catch (e) { callback({ error: e.message }); }
     });
@@ -101,29 +120,39 @@ app.prepare().then(async () => {
     });
 
     socket.on('consume', async ({ producerId, rtpCapabilities }, callback) => {
+      console.log(`[INFO] Consume request from ${socket.id} for producer ${producerId}`);
       try {
         if (!router.canConsume({ producerId, rtpCapabilities })) {
-            console.error(`Cannot consume`);
+            console.error(`[ERROR] Socket ${socket.id} cannot consume producer ${producerId}`);
             return callback({ error: 'Cannot consume' });
         }
         const transport = clients[socket.id].recvTransport;
-        if (!transport) return callback({ error: 'Recv transport not found' });
+        if (!transport) {
+          console.error(`[ERROR] Recv transport not found for socket ${socket.id}`);
+          return callback({ error: 'Recv transport not found' });
+        }
 
         const consumer = await transport.consume({ producerId, rtpCapabilities, paused: true });
         clients[socket.id].consumers.set(consumer.id, consumer);
+        console.log(`[SUCCESS] Consumer created for ${socket.id}: (Consumer ID: ${consumer.id}, Producer ID: ${producerId})`);
         callback({ id: consumer.id, producerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters });
       } catch (e) { 
-          console.error('Consume error:', e);
+          console.error(`[ERROR] Consume error for socket ${socket.id}:`, e.message);
           callback({ error: e.message }); 
         }
     });
 
     socket.on('resume-consumer', async ({ consumerId }, callback) => {
+      console.log(`[INFO] Resume request received for consumer ${consumerId} from ${socket.id}`);
       const consumer = clients[socket.id]?.consumers.get(consumerId);
       if (consumer) {
         await consumer.resume();
+        console.log(`[SUCCESS] Consumer resumed: ${consumerId}`);
+        callback({ resumed: true });
+      } else {
+        console.error(`[ERROR] Consumer not found for resume request: ${consumerId}`);
+        callback({ resumed: false });
       }
-      callback();
     });
   });
 

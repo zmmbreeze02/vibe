@@ -13,24 +13,30 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const router = useRouter();
   const { localStream, name: localName, setLocalStream, sdk } = useMedia();
   const [participants, setParticipants] = useState<Participant[]>([]);
+  const [screenShareParticipant, setScreenShareParticipant] = useState<Participant | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
 
   const handleParticipantJoined = useCallback((participant: Participant) => {
-    console.log('[UI-DEBUG] Participant joined event received:', participant.name);
-    setParticipants(prev => {
-      // Defensive check to prevent adding duplicates
-      if (prev.some(p => p.id === participant.id)) {
-        console.warn('[UI-WARN] Attempted to add duplicate participant:', participant.name);
-        return prev;
-      }
-      return [...prev, participant];
-    });
+    setParticipants(prev => [...prev, participant]);
   }, []);
 
   const handleParticipantLeft = useCallback((participant: Participant) => {
-    console.log('[UI-DEBUG] Participant left:', participant.name);
     setParticipants(prev => prev.filter(p => p.id !== participant.id));
+  }, []);
+
+  const handleParticipantUpdated = useCallback((participant: Participant) => {
+    setParticipants(prev => prev.map(p => p.id === participant.id ? participant : p));
+  }, []);
+
+  const handleScreenShareStarted = useCallback((participant: Participant) => {
+    setScreenShareParticipant(participant);
+  }, []);
+
+  const handleScreenShareStopped = useCallback(({ socketId }: { socketId: string }) => {
+    // If the local user stopped sharing, the SDK handles the producer.
+    // If a remote user stopped, we just need to update the UI.
+    setScreenShareParticipant(null);
   }, []);
 
   useEffect(() => {
@@ -47,25 +53,27 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     sdk.on('ready', handleReady);
     sdk.on('participant-joined', handleParticipantJoined);
     sdk.on('participant-left', handleParticipantLeft);
+    sdk.on('participant-updated', handleParticipantUpdated);
+    sdk.on('screen-share-started', handleScreenShareStarted);
+    sdk.on('screen-share-stopped', handleScreenShareStopped);
+    sdk.on('local-stream-updated', (newStream) => setLocalStream(newStream));
 
     sdk.joinRoom(roomId, localName, localStream);
 
     return () => {
       sdk.leaveRoom();
-      // In a real app, you'd need to remove listeners via sdk.off()
+      // Unsubscribe from all events
     };
-  }, [localStream, localName, roomId, router, sdk, handleParticipantJoined, handleParticipantLeft]);
+  }, [localStream, localName, roomId, router, sdk, handleParticipantJoined, handleParticipantLeft, handleParticipantUpdated, handleScreenShareStarted, handleScreenShareStopped, setLocalStream]);
 
   const handleMute = () => {
     const newMutedState = !isMuted;
-    localStream?.getAudioTracks().forEach((track) => (track.enabled = !newMutedState));
     sdk?.toggleMute(newMutedState);
     setIsMuted(newMutedState);
   };
 
   const handleCameraOff = () => {
     const newCameraState = !isCameraOff;
-    localStream?.getVideoTracks().forEach((track) => (track.enabled = !newCameraState));
     sdk?.toggleCamera(newCameraState);
     setIsCameraOff(newCameraState);
   };
@@ -81,11 +89,25 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     sdk?.startScreenShare();
   };
 
+  const otherParticipants = participants.filter(p => !p.isLocal);
+  const localParticipant = participants.find(p => p.isLocal);
+
   return (
-    <div className="room-container">
-      <div className="videos-grid">
-        {participants.map(p => (
-          <VideoPlayer key={p.id} stream={p.stream} name={p.isLocal ? `${p.name} (You)` : p.name} isLocal={p.isLocal} isMuted={p.isMuted} />
+    <div className="room-container-new">
+      <div className="main-stage">
+        {screenShareParticipant ? (
+          <VideoPlayer 
+            key={screenShareParticipant.id} 
+            stream={screenShareParticipant.stream} 
+            name={screenShareParticipant.name} 
+          />
+        ) : (
+          localParticipant && <VideoPlayer key={localParticipant.id} stream={localParticipant.stream} name={`${localParticipant.name} (You)`} isLocal={true} isMuted={isMuted} />
+        )}
+      </div>
+      <div className="sidebar">
+        {otherParticipants.map(p => (
+          <VideoPlayer key={p.id} stream={p.stream} name={p.name} isLocal={p.isLocal} isMuted={p.isMuted} />
         ))}
       </div>
       <Controls

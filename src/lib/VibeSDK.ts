@@ -23,7 +23,7 @@ export class VibeSDK extends EventEmitter {
   private consumers: Map<string, Consumer> = new Map();
   private participants: Map<string, Participant> = new Map();
   private localParticipant: Participant | null = null;
-  private cameraTrack: MediaStreamTrack | null = null;
+  private screenShareProducer: Producer | null = null;
 
   constructor() { super(); this.init(); }
 
@@ -43,14 +43,15 @@ export class VibeSDK extends EventEmitter {
       this.participants.set(this.socket!.id, this.localParticipant);
       this.cameraTrack = localStream.getVideoTracks()[0];
 
-      // Listen for events before joining the room to avoid race conditions
       this.listenForRoomEvents();
 
-      this.socket!.emit('join-room', roomId);
       this.socket!.emit('routerRtpCapabilities', {}, async (routerRtpCapabilities: any) => {
         this.device = new Device();
         await this.device.load({ routerRtpCapabilities });
         await this.initTransports(localStream, name);
+        
+        this.socket!.emit('join-room', roomId);
+
         this.emit('ready', this.localParticipant);
       });
     };
@@ -66,10 +67,9 @@ export class VibeSDK extends EventEmitter {
         this.socket!.emit('create-transport', { isSender: true }, (params: any) => {
             this.sendTransport = this.device!.createSendTransport(params);
             this.sendTransport.on('connect', ({ dtlsParameters }, cb) => this.socket?.emit('connect-transport', { transportId: this.sendTransport?.id, dtlsParameters }, () => cb()));
-            this.sendTransport.on('produce', ({ kind, rtpParameters }, cb) => {
-        console.log(`[SDK-DEBUG] Emitting produce for ${kind} with name: ${name}`);
-        this.socket?.emit('produce', { kind, rtpParameters, appData: { name } }, ({ id }: any) => cb({ id }));
-      });
+            this.sendTransport.on('produce', ({ kind, rtpParameters, appData }, cb) => {
+              this.socket?.emit('produce', { kind, rtpParameters, appData }, ({ id }: any) => cb({ id }));
+            });
             resolve();
         });
     });
@@ -83,17 +83,19 @@ export class VibeSDK extends EventEmitter {
     });
 
     for (const track of localStream.getTracks()) {
-        const producer = await this.sendTransport!.produce({ track });
+        const producer = await this.sendTransport!.produce({ track, appData: { name } });
         this.producers.set(track.kind, producer);
     }
   }
 
   private listenForRoomEvents() {
     this.socket?.on('existing-producers', (producers) => {
-      for (const { producerId, socketId, name } of producers) this.consume({ producerId, socketId, name });
+      for (const { producerId, socketId, name, isScreenShare } of producers) {
+        this.consume({ producerId, socketId, name, isScreenShare });
+      }
     });
-    this.socket?.on('new-producer', ({ producerId, socketId, name }) => {
-      this.consume({ producerId, socketId, name });
+    this.socket?.on('new-producer', ({ producerId, socketId, name, isScreenShare }) => {
+      this.consume({ producerId, socketId, name, isScreenShare });
     });
     this.socket?.on('user-disconnected', ({ socketId }) => {
       const participant = this.participants.get(socketId);
@@ -109,44 +111,70 @@ export class VibeSDK extends EventEmitter {
             this.emit('participant-updated', participant);
         }
     });
+    this.socket?.on('producer-closed', ({ producerId }) => {
+      const consumer = Array.from(this.consumers.values()).find(c => c.producerId === producerId);
+      if (consumer) {
+        consumer.close();
+        this.consumers.delete(consumer.id);
+        
+        // Find which participant had this consumer and if it was a screen share
+        const participant = Array.from(this.participants.values()).find(p => p.consumers.has(consumer.id));
+        if (participant) {
+          participant.consumers.delete(consumer.id);
+          if (participant.isScreenShare) {
+            this.emit('screen-share-stopped', { socketId: participant.id });
+            this.participants.delete(participant.id); // Clean up the screen share participant
+          }
+        }
+      }
+    });
   }
 
-  private consume({ producerId, socketId, name }: { producerId: string, socketId: string, name: string }) {
+  private consume({ producerId, socketId, name, isScreenShare }: { producerId: string, socketId: string, name: string, isScreenShare: boolean }) {
     if (!this.device || !this.recvTransport || !this.socket) return;
 
     const { rtpCapabilities } = this.device;
     this.socket.emit('consume', { producerId, rtpCapabilities }, async (params: any) => {
-      if (params.error) {
-        console.error('Cannot consume', params.error);
-        return;
-      }
+      if (params.error) return console.error('Cannot consume', params.error);
       
       const consumer = await this.recvTransport!.consume(params);
       this.consumers.set(consumer.id, consumer);
+      this.socket!.emit('resume-consumer', { consumerId: consumer.id }, () => {});
+
+      if (isScreenShare) {
+        const screenShareParticipant = new Participant(socketId, `${name}'s Screen`, false);
+        screenShareParticipant.isScreenShare = true;
+        screenShareParticipant.addTrack(consumer.track);
+        screenShareParticipant.consumers.set(consumer.id, consumer);
+        this.participants.set(socketId + '-screen', screenShareParticipant); // Use a unique ID
+        this.emit('screen-share-started', screenShareParticipant);
+        return;
+      }
 
       let participant = this.participants.get(socketId);
       if (!participant) {
         participant = new Participant(socketId, name);
         this.participants.set(socketId, participant);
-        participant.addTrack(consumer.track);
         this.emit('participant-joined', participant);
-      } else {
-        participant.addTrack(consumer.track);
-        this.emit('participant-updated', participant);
       }
-
-      this.socket!.emit('resume-consumer', { consumerId: consumer.id }, () => {});
+      participant.addTrack(consumer.track);
+      participant.consumers.set(consumer.id, consumer);
+      this.emit('participant-updated', participant);
     });
   }
 
   async startScreenShare() {
-    if (!this.sendTransport) return;
-    const videoProducer = this.producers.get('video');
-    if (!videoProducer) return;
+    if (!this.sendTransport || !this.localParticipant) return;
+    
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       const screenTrack = screenStream.getVideoTracks()[0];
-      await videoProducer.replaceTrack({ track: screenTrack });
+      
+      this.screenShareProducer = await this.sendTransport.produce({
+        track: screenTrack,
+        appData: { name: this.localParticipant.name, isScreenShare: true }
+      });
+
       screenTrack.onended = () => this.stopScreenShare();
     } catch (error) {
       console.error('Error starting screen share:', error);
@@ -154,10 +182,11 @@ export class VibeSDK extends EventEmitter {
   }
 
   async stopScreenShare() {
-    if (!this.cameraTrack) return;
-    const videoProducer = this.producers.get('video');
-    if (!videoProducer) return;
-    await videoProducer.replaceTrack({ track: this.cameraTrack });
+    if (!this.screenShareProducer) return;
+    this.screenShareProducer.close(); // This will trigger a 'producerclose' event on the server transport
+    this.screenShareProducer = null;
+    // The local UI needs to be notified immediately
+    this.emit('screen-share-stopped', { socketId: this.socket?.id });
   }
 
   toggleMute(isMuted: boolean) {

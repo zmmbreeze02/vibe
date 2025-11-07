@@ -16,32 +16,38 @@ const MuteIcon = () => (
 );
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({ stream, name, isLocal, isMuted }) => {
+  console.log(`[VideoPlayer] Rendering for ${name}. Initial stream prop:`, stream);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoStream, setVideoStream] = useState<MediaStream | undefined>(stream);
 
   useEffect(() => {
+    console.log(`[VideoPlayer] Top useEffect for ${name}. Stream prop changed:`, stream);
     setVideoStream(stream);
 
-    const handleTrack = () => {
-      // When a new track is added, create a new MediaStream object
-      // to force a re-render of the video component.
+    const handleTrack = (e: MediaStreamTrackEvent) => {
+      console.log(`[VideoPlayer] 'addtrack' event fired for ${name}. Track:`, e.track);
       if (stream) {
+        console.log(`[VideoPlayer] Re-setting videoStream for ${name} with new tracks.`);
         setVideoStream(new MediaStream(stream.getTracks()));
       }
     };
 
-    stream?.addEventListener('addtrack', handleTrack);
+    stream?.addEventListener('addtrack', handleTrack as EventListener);
 
     return () => {
-      stream?.removeEventListener('addtrack', handleTrack);
+      stream?.removeEventListener('addtrack', handleTrack as EventListener);
     };
-  }, [stream]);
+  }, [stream, name]);
 
   useEffect(() => {
+    console.log(`[VideoPlayer] Bottom useEffect for ${name}. videoStream state changed:`, videoStream);
     if (videoRef.current && videoStream) {
+      console.log(`[VideoPlayer] Assigning srcObject for ${name}.`, videoStream);
       videoRef.current.srcObject = videoStream;
+    } else {
+      console.log(`[VideoPlayer] Not assigning srcObject for ${name}. Ref or stream is null.`, { ref: videoRef.current, videoStream });
     }
-  }, [videoStream]);
+  }, [videoStream, name]);
 
   return (
     <div className="video-container">
